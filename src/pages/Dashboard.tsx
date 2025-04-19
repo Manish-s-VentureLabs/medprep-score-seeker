@@ -1,4 +1,3 @@
-
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
@@ -11,6 +10,7 @@ import DashboardHeader from "@/components/DashboardHeader";
 import SubjectScoreCard from "@/components/SubjectScoreCard";
 import { BarChart, Bar } from "recharts";
 import { Session } from "@supabase/supabase-js";
+import { calculatePrepScoreWithMocks, getMultiplier, getRecentnessFactor } from "@/lib/scoring";
 
 // Types
 type SessionType = {
@@ -107,118 +107,86 @@ const Dashboard = () => {
   };
 
   const calculateScores = (sessions: SessionType[]) => {
-    // Group by subject
-    const subjectGroups: Record<string, SessionType[]> = {};
+    // Group sessions by subject and type
+    const dataBySubject: Record<string, { practice: SessionType[], mock: SessionType[] }> = {};
+    
     sessions.forEach(session => {
-      if (!subjectGroups[session.subject]) {
-        subjectGroups[session.subject] = [];
+      if (!dataBySubject[session.subject]) {
+        dataBySubject[session.subject] = { practice: [], mock: [] };
       }
-      subjectGroups[session.subject].push(session);
+      if (session.type === 'practice') {
+        dataBySubject[session.subject].practice.push(session);
+      } else {
+        dataBySubject[session.subject].mock.push(session);
+      }
     });
 
-    // Calculate score for each subject
-    const scores: SubjectScore[] = [];
-    let weightedTotalScore = 0;
-    let totalWeight = 0;
+    // Calculate overall score using new algorithm
+    const totalScore = calculatePrepScoreWithMocks(dataBySubject);
+    setTotalScore(totalScore);
 
-    Object.entries(subjectGroups).forEach(([subject, subjectSessions]) => {
-      const weight = subjectWeights[subject as keyof typeof subjectWeights] || 1;
-      totalWeight += weight;
-      
-      const practiceScores = calculateScoresForSessions(
-        subjectSessions.filter(s => s.type === "practice"),
-        0.4
-      );
-      
-      const mockScores = calculateScoresForSessions(
-        subjectSessions.filter(s => s.type === "mock"),
-        0.6
-      );
-      
-      const subjectScore = practiceScores + mockScores;
-      const weightedScore = subjectScore * weight;
-      
-      weightedTotalScore += weightedScore;
-      
+    // Calculate individual subject scores
+    const scores: SubjectScore[] = [];
+    for (const subject in dataBySubject) {
+      const subjectData = dataBySubject[subject];
+      const practiceScore = calculateSessionScore(subjectData.practice);
+      const mockScore = calculateSessionScore(subjectData.mock);
+      const subjectScore = (practiceScore * 0.4 + mockScore * 0.6) * 100;
+
       scores.push({
         subject,
         score: subjectScore,
-        count: subjectSessions.length,
-        weight
+        count: subjectData.practice.length + subjectData.mock.length,
+        weight: subjectWeights[subject as keyof typeof subjectWeights] || 1
       });
-    });
+    }
 
-    // Sort by score (descending)
     scores.sort((a, b) => b.score - a.score);
     setSubjectScores(scores);
 
-    // Calculate total score (normalized to 100)
-    const normalizedTotalScore = (weightedTotalScore / totalWeight) * 100;
-    setTotalScore(Math.min(Math.round(normalizedTotalScore), 100));
-
-    // Generate score trend data (last 7 days)
+    // Calculate score trend
     const last7Days = generateLast7Days();
     const scoreByDay: Record<string, { sum: number; count: number }> = {};
-    
-    // Initialize days
+
     last7Days.forEach(day => {
       scoreByDay[day] = { sum: 0, count: 0 };
     });
-    
-    // Group sessions by day
+
     sessions.forEach(session => {
       const day = new Date(session.created_at).toISOString().split('T')[0];
       if (scoreByDay[day]) {
-        const score = calculateSessionScore(session);
+        const score = calculateSessionScore([session]) * 100;
         scoreByDay[day].sum += score;
         scoreByDay[day].count += 1;
       }
     });
-    
-    // Generate trend data
+
     const trend = last7Days.map(day => ({
       date: day,
-      score: scoreByDay[day].count > 0 
-        ? scoreByDay[day].sum / scoreByDay[day].count 
+      score: scoreByDay[day].count > 0
+        ? scoreByDay[day].sum / scoreByDay[day].count
         : 0
     }));
-    
+
     setScoreTrend(trend);
   };
 
-  const calculateScoresForSessions = (sessions: SessionType[], weight: number) => {
+  const calculateSessionScore = (sessions: SessionType[]): number => {
     if (sessions.length === 0) return 0;
-    
-    let totalScore = 0;
-    sessions.forEach(session => {
-      totalScore += calculateSessionScore(session);
-    });
-    
-    return (totalScore / sessions.length) * weight;
-  };
 
-  const calculateSessionScore = (session: SessionType) => {
-    const accuracy = session.correct_questions / session.total_questions;
-    
-    let difficultyMultiplier = 1.0;
-    if (session.difficulty === "medium") difficultyMultiplier = 1.2;
-    if (session.difficulty === "hard") difficultyMultiplier = 1.4;
-    
-    let confidenceMultiplier = 1.0;
-    if (session.confidence === "low") confidenceMultiplier = 0.8;
-    if (session.confidence === "high") confidenceMultiplier = 1.2;
-    
-    const guessPercent = session.guess_percent / 100;
-    
-    const daysSince = Math.abs(
-      (new Date().getTime() - new Date(session.created_at).getTime()) / (1000 * 60 * 60 * 24)
-    );
-    const recentnessFactor = Math.exp(-daysSince / 30);
-    
-    const score = accuracy * difficultyMultiplier * confidenceMultiplier * 
-                 (1 - guessPercent * 0.3) * recentnessFactor;
-                 
-    return score * 100; // Convert to 0-100 scale
+    let total = 0;
+    sessions.forEach(session => {
+      const accuracy = session.correct_questions / session.total_questions;
+      const difficultyMult = getMultiplier("difficulty", session.difficulty);
+      const confidenceMult = getMultiplier("confidence", session.confidence);
+      const guessFactor = 1 - (session.guess_percent / 100) * 0.3;
+      const recentness = getRecentnessFactor(session.created_at);
+
+      const score = accuracy * difficultyMult * confidenceMult * guessFactor * recentness;
+      total += score;
+    });
+
+    return total / sessions.length;
   };
 
   const generateLast7Days = () => {
@@ -230,29 +198,28 @@ const Dashboard = () => {
     }
     return days;
   };
-
+  
   const getMotivationalMessage = () => {
     if (subjectScores.length === 0) return "Start tracking your progress by adding sessions!";
-    
+  
     const bestSubject = subjectScores[0];
     const worstSubject = subjectScores[subjectScores.length - 1];
-    
+  
     if (scoreTrend.length >= 3) {
       const latest = scoreTrend[scoreTrend.length - 1].score;
       const previous = scoreTrend[scoreTrend.length - 3].score;
-      
+  
       if (latest > previous) {
         return `Great progress! Your scores are improving. Keep focusing on ${worstSubject.subject} to get even better.`;
       }
     }
-    
+  
     if (bestSubject.score > 70) {
       return `You're doing great in ${bestSubject.subject}, but need to focus more on ${worstSubject.subject}.`;
     }
-    
+  
     return `Keep practicing! Focus on ${worstSubject.subject} to improve your overall score.`;
   };
-
   const handleLogout = async () => {
     try {
       await supabase.auth.signOut();
@@ -437,7 +404,7 @@ const Dashboard = () => {
                         <td className="px-6 py-4 whitespace-nowrap">{session.subject}</td>
                         <td className="px-6 py-4 whitespace-nowrap capitalize">{session.type}</td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          {Math.round(calculateSessionScore(session))}%
+                          {Math.round(calculateSessionScore([session]))}%
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           {new Date(session.created_at).toLocaleDateString()}
