@@ -1,4 +1,3 @@
-
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
@@ -24,6 +23,7 @@ import {
 } from "@/components/ui/select";
 import { Session } from "@supabase/supabase-js";
 import DashboardHeader from "@/components/DashboardHeader";
+import { calculatePrepScoreWithMocks } from "@/lib/scoring";
 
 const subjects = [
   "Medicine", "Surgery", "OB-GYN", "Pediatrics",
@@ -36,12 +36,12 @@ const subjects = [
 const AddSession = () => {
   const navigate = useNavigate();
   const [subject, setSubject] = useState("");
-  const [correctQuestions, setCorrectQuestions] = useState<number>(0);
-  const [totalQuestions, setTotalQuestions] = useState<number>(0);
+  const [correctQuestions, setCorrectQuestions] = useState<string>("");
+  const [totalQuestions, setTotalQuestions] = useState<string>("");
   const [difficulty, setDifficulty] = useState<"easy" | "medium" | "hard">("medium");
   const [confidence, setConfidence] = useState<"low" | "medium" | "high">("medium");
   const [guessPercent, setGuessPercent] = useState<number>(0);
-  const [timeTaken, setTimeTaken] = useState<number>(0);
+  const [timeTaken, setTimeTaken] = useState<string>("");
   const [sessionType, setSessionType] = useState<"practice" | "mock">("practice");
   const [loading, setLoading] = useState(false);
   const [userSession, setUserSession] = useState<Session | null>(null);
@@ -76,7 +76,11 @@ const AddSession = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (correctQuestions > totalQuestions) {
+    const correctQuestionsNum = parseInt(correctQuestions) || 0;
+    const totalQuestionsNum = parseInt(totalQuestions) || 0;
+    const timeTakenNum = parseInt(timeTaken) || 0;
+    
+    if (correctQuestionsNum > totalQuestionsNum) {
       toast.error("Correct questions cannot exceed total questions");
       return;
     }
@@ -92,17 +96,65 @@ const AddSession = () => {
       const { error } = await supabase.from("sessions").insert({
         user_id: userSession?.user.id,
         subject,
-        correct_questions: correctQuestions,
-        total_questions: totalQuestions,
+        correct_questions: correctQuestionsNum,
+        total_questions: totalQuestionsNum,
         difficulty,
         confidence,
         guess_percent: guessPercent,
-        time_taken: timeTaken,
+        time_taken: timeTakenNum,
         type: sessionType
       });
 
       if (error) {
         throw error;
+      }
+
+      // Calculate new score
+      const { data: sessions } = await supabase
+        .from("sessions")
+        .select("*")
+        .eq("user_id", userSession?.user.id);
+
+      if (sessions) {
+        // Group sessions by subject and type
+        const dataBySubject: Record<string, { practice: any[], mock: any[] }> = {};
+        
+        sessions.forEach(session => {
+          if (!dataBySubject[session.subject]) {
+            dataBySubject[session.subject] = { practice: [], mock: [] };
+          }
+          if (session.type === 'practice') {
+            dataBySubject[session.subject].practice.push(session);
+          } else {
+            dataBySubject[session.subject].mock.push(session);
+          }
+        });
+
+        // Calculate new score
+        const newScore = calculatePrepScoreWithMocks(dataBySubject);
+
+        // Update profile with new score
+        const { error: updateError } = await supabase
+          .from("profiles")
+          .update({ prediction_score: newScore })
+          .eq("id", userSession?.user.id);
+
+        if (updateError) {
+          throw updateError;
+        }
+
+        // Record the score change in history
+        const { error: historyError } = await supabase
+          .from("score_history")
+          .insert({
+            user_id: userSession?.user.id,
+            score: newScore,
+            created_at: new Date().toISOString()
+          });
+
+        if (historyError) {
+          throw historyError;
+        }
       }
 
       toast.success("Session added successfully!");
@@ -181,7 +233,8 @@ const AddSession = () => {
                     type="number"
                     min="0"
                     value={correctQuestions}
-                    onChange={(e) => setCorrectQuestions(parseInt(e.target.value) || 0)}
+                    onChange={(e) => setCorrectQuestions(e.target.value)}
+                    placeholder="Enter number of correct questions"
                   />
                 </div>
                 
@@ -192,7 +245,8 @@ const AddSession = () => {
                     type="number"
                     min="1"
                     value={totalQuestions}
-                    onChange={(e) => setTotalQuestions(parseInt(e.target.value) || 0)}
+                    onChange={(e) => setTotalQuestions(e.target.value)}
+                    placeholder="Enter total number of questions"
                   />
                 </div>
 
@@ -237,7 +291,8 @@ const AddSession = () => {
                     type="number"
                     min="1"
                     value={timeTaken}
-                    onChange={(e) => setTimeTaken(parseInt(e.target.value) || 0)}
+                    onChange={(e) => setTimeTaken(e.target.value)}
+                    placeholder="Enter time taken in minutes"
                   />
                 </div>
               </div>
@@ -274,7 +329,7 @@ const AddSession = () => {
               </Button>
               <Button 
                 type="submit" 
-                disabled={loading || !subject || totalQuestions < 1}
+                disabled={loading || !subject || !totalQuestions || !timeTaken || parseInt(totalQuestions) < 1 || parseInt(timeTaken) < 1}
               >
                 {loading ? "Saving..." : "Save Session"}
               </Button>

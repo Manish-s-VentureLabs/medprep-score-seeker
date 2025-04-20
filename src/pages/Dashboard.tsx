@@ -48,130 +48,129 @@ const subjectWeights = {
 
 const Dashboard = () => {
   const navigate = useNavigate();
-  const [sessions, setSessions] = useState<SessionType[]>([]);
+  const [sessions, setSessions] = useState<any[]>([]);
+  const [profile, setProfile] = useState<any>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [subjectScores, setSubjectScores] = useState<SubjectScore[]>([]);
   const [scoreTrend, setScoreTrend] = useState<ScoreTrend[]>([]);
   const [totalScore, setTotalScore] = useState<number>(0);
-  const [loading, setLoading] = useState(true);
   const [userSession, setUserSession] = useState<Session | null>(null);
 
   useEffect(() => {
-    const checkUser = async () => {
-      const { data } = await supabase.auth.getSession();
-      if (!data.session) {
-        navigate("/auth");
-        return;
-      }
-      setUserSession(data.session);
-      fetchSessions();
-    };
-
-    checkUser();
-
-    const { data: authListener } = supabase.auth.onAuthStateChange(
-      (event, session) => {
-        if (event === "SIGNED_OUT") {
-          navigate("/auth");
-        } else if (session) {
-          setUserSession(session);
+    const fetchData = async () => {
+      try {
+        const { data: { session: userSession } } = await supabase.auth.getSession();
+        if (!userSession) {
+          setError("No active session");
+          return;
         }
-      }
-    );
 
-    return () => {
-      authListener.subscription.unsubscribe();
+        // Fetch profile first to get stored prediction_score
+        const { data: profileData, error: profileError } = await supabase
+          .from("profiles")
+          .select("*")
+          .eq("id", userSession.user.id)
+          .single();
+
+        if (profileError) throw profileError;
+        setProfile(profileData);
+        // Update totalScore with the stored prediction_score
+        setTotalScore(profileData?.prediction_score || 0);
+
+        // Fetch score history
+        const { data: scoreHistory, error: historyError } = await supabase
+          .from("score_history")
+          .select("*")
+          .eq("user_id", userSession.user.id)
+          .order("created_at", { ascending: true });
+
+        if (historyError) throw historyError;
+
+        // Generate last 7 days
+        const last7Days = generateLast7Days();
+        const trend: ScoreTrend[] = [];
+
+        // For each day, find the latest score before or on that day
+        last7Days.forEach(day => {
+          const dayDate = new Date(day);
+          // Find all scores for this day
+          const dayScores = scoreHistory?.filter(record => {
+            const recordDate = new Date(record.created_at);
+            return recordDate.toDateString() === dayDate.toDateString();
+          });
+
+          // If we have scores for this day, use the latest one
+          if (dayScores && dayScores.length > 0) {
+            const latestScore = dayScores.reduce((latest, current) => {
+              return new Date(current.created_at) > new Date(latest.created_at) ? current : latest;
+            });
+            trend.push({
+              date: day,
+              score: latestScore.score
+            });
+          } else {
+            // If no scores for this day, find the most recent score before this day
+            const previousScores = scoreHistory?.filter(record => 
+              new Date(record.created_at) < dayDate
+            );
+            
+            if (previousScores && previousScores.length > 0) {
+              const latestPreviousScore = previousScores.reduce((latest, current) => {
+                return new Date(current.created_at) > new Date(latest.created_at) ? current : latest;
+              });
+              trend.push({
+                date: day,
+                score: latestPreviousScore.score
+              });
+            } else {
+              // If no previous scores either, use 0
+              trend.push({
+                date: day,
+                score: 0
+              });
+            }
+          }
+        });
+
+        console.log("Score History:", scoreHistory);
+        console.log("Trend Data:", trend);
+        setScoreTrend(trend);
+
+        // Fetch sessions for other calculations
+        const { data: sessionsData, error: sessionsError } = await supabase
+          .from("sessions")
+          .select("*")
+          .eq("user_id", userSession.user.id)
+          .order("created_at", { ascending: false });
+
+        if (sessionsError) throw sessionsError;
+        setSessions(sessionsData || []);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "An error occurred");
+      } finally {
+        setIsLoading(false);
+      }
     };
-  }, [navigate]);
 
-  const fetchSessions = async () => {
-    try {
-      setLoading(true);
-      const { data, error } = await supabase
-        .from("sessions")
-        .select("*")
-        .order("created_at", { ascending: false });
+    fetchData();
+  }, []);
 
-      if (error) {
-        throw error;
-      }
-
-      if (data) {
-        setSessions(data as SessionType[]);
-        calculateScores(data as SessionType[]);
-      }
-    } catch (error: any) {
-      toast.error(`Error fetching sessions: ${error.message}`);
-    } finally {
-      setLoading(false);
+  // Group sessions by subject and type
+  const dataBySubject: Record<string, { practice: any[], mock: any[] }> = {};
+  
+  sessions.forEach(session => {
+    if (!dataBySubject[session.subject]) {
+      dataBySubject[session.subject] = { practice: [], mock: [] };
     }
-  };
-
-  const calculateScores = (sessions: SessionType[]) => {
-    // Group sessions by subject and type
-    const dataBySubject: Record<string, { practice: SessionType[], mock: SessionType[] }> = {};
-    
-    sessions.forEach(session => {
-      if (!dataBySubject[session.subject]) {
-        dataBySubject[session.subject] = { practice: [], mock: [] };
-      }
-      if (session.type === 'practice') {
-        dataBySubject[session.subject].practice.push(session);
-      } else {
-        dataBySubject[session.subject].mock.push(session);
-      }
-    });
-
-    // Calculate overall score using new algorithm
-    const totalScore = calculatePrepScoreWithMocks(dataBySubject);
-    setTotalScore(totalScore);
-
-    // Calculate individual subject scores
-    const scores: SubjectScore[] = [];
-    for (const subject in dataBySubject) {
-      const subjectData = dataBySubject[subject];
-      const practiceScore = calculateSessionScore(subjectData.practice);
-      const mockScore = calculateSessionScore(subjectData.mock);
-      const subjectScore = (practiceScore * 0.4 + mockScore * 0.6) * 100;
-
-      scores.push({
-        subject,
-        score: subjectScore,
-        count: subjectData.practice.length + subjectData.mock.length,
-        weight: subjectWeights[subject as keyof typeof subjectWeights] || 1
-      });
+    if (session.type === 'practice') {
+      dataBySubject[session.subject].practice.push(session);
+    } else {
+      dataBySubject[session.subject].mock.push(session);
     }
+  });
 
-    scores.sort((a, b) => b.score - a.score);
-    setSubjectScores(scores);
-
-    // Calculate score trend
-    const last7Days = generateLast7Days();
-    const scoreByDay: Record<string, { sum: number; count: number }> = {};
-
-    last7Days.forEach(day => {
-      scoreByDay[day] = { sum: 0, count: 0 };
-    });
-
-    sessions.forEach(session => {
-      const day = new Date(session.created_at).toISOString().split('T')[0];
-      if (scoreByDay[day]) {
-        const score = calculateSessionScore([session]) * 100;
-        scoreByDay[day].sum += score;
-        scoreByDay[day].count += 1;
-      }
-    });
-
-    const trend = last7Days.map(day => ({
-      date: day,
-      score: scoreByDay[day].count > 0
-        ? scoreByDay[day].sum / scoreByDay[day].count
-        : 0
-    }));
-
-    setScoreTrend(trend);
-  };
-
-  const calculateSessionScore = (sessions: SessionType[]): number => {
+  const calculateSessionScore = (sessions: any[]): number => {
     if (sessions.length === 0) return 0;
 
     let total = 0;
@@ -198,7 +197,31 @@ const Dashboard = () => {
     }
     return days;
   };
-  
+
+  // Calculate subject scores and trend
+  useEffect(() => {
+    if (sessions.length > 0) {
+      // Calculate individual subject scores
+      const scores: SubjectScore[] = [];
+      for (const subject in dataBySubject) {
+        const subjectData = dataBySubject[subject];
+        const practiceScore = calculateSessionScore(subjectData.practice);
+        const mockScore = calculateSessionScore(subjectData.mock);
+        const subjectScore = (practiceScore * 0.4 + mockScore * 0.6) * 100;
+
+        scores.push({
+          subject,
+          score: subjectScore,
+          count: subjectData.practice.length + subjectData.mock.length,
+          weight: subjectWeights[subject as keyof typeof subjectWeights] || 1
+        });
+      }
+
+      scores.sort((a, b) => b.score - a.score);
+      setSubjectScores(scores);
+    }
+  }, [sessions]);
+
   const getMotivationalMessage = () => {
     if (subjectScores.length === 0) return "Start tracking your progress by adding sessions!";
   
@@ -311,25 +334,47 @@ const Dashboard = () => {
             <Card>
               <CardHeader>
                 <CardTitle>Weekly Progress</CardTitle>
+                <CardDescription>Your prediction score changes over the last 7 days</CardDescription>
               </CardHeader>
               <CardContent>
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={scoreTrend}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="date" />
-                      <YAxis domain={[0, 100]} />
-                      <Tooltip />
-                      <Legend />
-                      <Line 
-                        type="monotone" 
-                        dataKey="score" 
-                        stroke="#8884d8" 
-                        name="Daily Score" 
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
+                {isLoading ? (
+                  <p>Loading score history...</p>
+                ) : scoreTrend.length === 0 ? (
+                  <p>No score history available yet. Add some sessions to see your progress!</p>
+                ) : (
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart 
+                        data={scoreTrend}
+                        margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis 
+                          dataKey="date" 
+                          tickFormatter={(date) => new Date(date).toLocaleDateString()}
+                        />
+                        <YAxis 
+                          domain={[0, 100]} 
+                          tickFormatter={(value) => `${value.toFixed(1)}`}
+                        />
+                        <Tooltip 
+                          formatter={(value: number) => [`${value.toFixed(2)}`, "Score"]}
+                          labelFormatter={(label) => `Date: ${new Date(label).toLocaleDateString()}`}
+                        />
+                        <Legend />
+                        <Line 
+                          type="monotone" 
+                          dataKey="score" 
+                          stroke="#8884d8" 
+                          name="Prediction Score" 
+                          dot={{ r: 4 }}
+                          activeDot={{ r: 6 }}
+                          strokeWidth={2}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
@@ -383,7 +428,7 @@ const Dashboard = () => {
             <CardTitle>Recent Sessions</CardTitle>
           </CardHeader>
           <CardContent>
-            {loading ? (
+            {isLoading ? (
               <p>Loading sessions...</p>
             ) : sessions.length === 0 ? (
               <p>No sessions yet. Start by adding your first practice or mock session!</p>
@@ -394,7 +439,7 @@ const Dashboard = () => {
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Subject</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Score</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Questions</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
                     </tr>
                   </thead>
@@ -404,7 +449,7 @@ const Dashboard = () => {
                         <td className="px-6 py-4 whitespace-nowrap">{session.subject}</td>
                         <td className="px-6 py-4 whitespace-nowrap capitalize">{session.type}</td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          {Math.round(calculateSessionScore([session]))}%
+                          {session.correct_questions}/{session.total_questions}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           {new Date(session.created_at).toLocaleDateString()}

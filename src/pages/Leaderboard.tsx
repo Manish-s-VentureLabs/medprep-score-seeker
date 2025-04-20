@@ -1,4 +1,3 @@
-
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
@@ -26,39 +25,6 @@ type ProfileWithScore = {
   nickname: string | null;
   email: string;
   score: number;
-};
-
-// Function to calculate score (same as in Dashboard)
-const calculateSessionScore = (session: any) => {
-  const accuracy = session.correct_questions / session.total_questions;
-  
-  let difficultyMultiplier = 1.0;
-  if (session.difficulty === "medium") difficultyMultiplier = 1.2;
-  if (session.difficulty === "hard") difficultyMultiplier = 1.4;
-  
-  let confidenceMultiplier = 1.0;
-  if (session.confidence === "low") confidenceMultiplier = 0.8;
-  if (session.confidence === "high") confidenceMultiplier = 1.2;
-  
-  const guessPercent = session.guess_percent / 100;
-  
-  const daysSince = Math.abs(
-    (new Date().getTime() - new Date(session.created_at).getTime()) / (1000 * 60 * 60 * 24)
-  );
-  const recentnessFactor = Math.exp(-daysSince / 30);
-  
-  const score = accuracy * difficultyMultiplier * confidenceMultiplier * 
-               (1 - guessPercent * 0.3) * recentnessFactor;
-               
-  return score * 100; // Convert to 0-100 scale
-};
-
-const subjectWeights = {
-  "Medicine": 15, "Surgery": 12, "OB-GYN": 10, "Pediatrics": 6,
-  "Pathology": 6, "Pharmacology": 6, "Biochemistry": 5, "Anatomy": 4,
-  "Physiology": 4, "Microbiology": 5, "Radiology": 5, "Dermatology": 3,
-  "Psychiatry": 3, "ENT": 2, "Ophthalmology": 2, "Anesthesia": 2,
-  "Forensic Medicine": 2
 };
 
 const Leaderboard = () => {
@@ -101,80 +67,30 @@ const Leaderboard = () => {
     try {
       setLoading(true);
       
-      // Get all profiles
+      // Get all profiles with prediction_score
       const { data: profiles, error: profilesError } = await supabase
         .from("profiles")
-        .select("*");
+        .select("id, nickname, email, prediction_score")
+        .order("prediction_score", { ascending: false });
         
       if (profilesError) throw profilesError;
       
-      // Get all sessions
-      const { data: allSessions, error: sessionsError } = await supabase
-        .from("sessions")
-        .select("*");
+      if (profiles) {
+        // Transform profiles into leaderboard format
+        const userScores: ProfileWithScore[] = profiles.map(profile => ({
+          id: profile.id,
+          nickname: profile.nickname,
+          email: profile.email,
+          score: profile.prediction_score !== null ? profile.prediction_score : 0
+        }));
         
-      if (sessionsError) throw sessionsError;
-      
-      if (profiles && allSessions) {
-        const userScores: ProfileWithScore[] = [];
-        
-        // Calculate score for each user
-        for (const profile of profiles) {
-          const userSessions = allSessions.filter(s => s.user_id === profile.id);
-          
-          if (userSessions.length === 0) {
-            // Skip users with no sessions
-            continue;
-          }
-          
-          // Group by subject
-          const subjectGroups: Record<string, any[]> = {};
-          userSessions.forEach(session => {
-            if (!subjectGroups[session.subject]) {
-              subjectGroups[session.subject] = [];
-            }
-            subjectGroups[session.subject].push(session);
-          });
-          
-          // Calculate score for each subject
-          let weightedTotalScore = 0;
-          let totalWeight = 0;
-          
-          Object.entries(subjectGroups).forEach(([subject, sessions]) => {
-            const weight = subjectWeights[subject as keyof typeof subjectWeights] || 1;
-            totalWeight += weight;
-            
-            const practiceScores = calculateScoresForSessions(
-              sessions.filter(s => s.type === "practice"),
-              0.4
-            );
-            
-            const mockScores = calculateScoresForSessions(
-              sessions.filter(s => s.type === "mock"),
-              0.6
-            );
-            
-            const subjectScore = practiceScores + mockScores;
-            const weightedScore = subjectScore * weight;
-            
-            weightedTotalScore += weightedScore;
-          });
-          
-          // Calculate total score (normalized to 100)
-          const normalizedTotalScore = totalWeight > 0 
-            ? (weightedTotalScore / totalWeight) * 100
-            : 0;
-            
-          userScores.push({
-            id: profile.id,
-            nickname: profile.nickname,
-            email: profile.email,
-            score: Math.min(Math.round(normalizedTotalScore), 100)
-          });
-        }
-        
-        // Sort by score (descending)
-        userScores.sort((a, b) => b.score - a.score);
+        // Sort users with null scores to the end
+        userScores.sort((a, b) => {
+          if (a.score === 0 && b.score === 0) return 0;
+          if (a.score === 0) return 1;
+          if (b.score === 0) return -1;
+          return b.score - a.score;
+        });
         
         setLeaderboard(userScores);
         
@@ -187,17 +103,6 @@ const Leaderboard = () => {
     } finally {
       setLoading(false);
     }
-  };
-
-  const calculateScoresForSessions = (sessions: any[], weight: number) => {
-    if (sessions.length === 0) return 0;
-    
-    let totalScore = 0;
-    sessions.forEach(session => {
-      totalScore += calculateSessionScore(session);
-    });
-    
-    return (totalScore / sessions.length) * weight;
   };
 
   const handleLogout = async () => {
@@ -262,7 +167,7 @@ const Leaderboard = () => {
                         {user.id === userSession?.user.id && " (You)"}
                       </TableCell>
                       <TableCell className="text-right font-bold">
-                        {user.score}
+                        {user.score.toFixed(2)}
                       </TableCell>
                     </TableRow>
                   ))}
