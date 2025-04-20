@@ -43,7 +43,7 @@ const SignIn = ({ onSwitch }: { onSwitch: () => void }) => {
     try {
       setIsResetting(true);
       const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/reset-password`,
+        redirectTo: `https://neetpreps.web.app/reset-password`,
       });
 
       if (error) throw error;
@@ -149,7 +149,7 @@ const SignUp = ({ onSwitch }: { onSwitch: () => void }) => {
         email,
         password,
         options: {
-          emailRedirectTo: `${window.location.origin}/auth`,
+          emailRedirectTo: `https://neetpreps.web.app/auth`,
         },
       });
   
