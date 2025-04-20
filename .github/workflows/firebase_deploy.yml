@@ -3,17 +3,17 @@ name: Deploy to Firebase Hosting
 on:
   push:
     branches:
-      - main  # Deploys on push to main branch
+      - main
   pull_request:
     branches:
-      - main  # Deploys preview on PRs to main
+      - main  # Creates preview on PRs to main
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v3
 
       - name: Set up Node.js
@@ -27,10 +27,22 @@ jobs:
       - name: Build project
         run: npm run build
 
-      - name: Deploy to Firebase Hosting
-        uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: '${{ secrets.GITHUB_TOKEN }}'
-          firebaseServiceAccount: '${{ secrets.FIREBASE_TOKEN }}'
-          channelId: live  # Use 'live' for production; omit or use branch name for previews
-          projectId: neetpreps  # Replace with your actual Firebase project ID
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Deploy to Staging (PR Preview)
+        if: github.event_name == 'pull_request'
+        run: |
+          firebase hosting:channel:deploy pr-${{ github.event.pull_request.number }} \
+            --project neetpreps \
+            --only hosting \
+            --expires 7d
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+
+      - name: Deploy to Production
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          firebase deploy --project neetpreps --only hosting
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
